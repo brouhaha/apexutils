@@ -118,7 +118,11 @@ class Apex:
         day = v % 32
         month = (v//32) % 16
         year = 1976 + v//512
-        return datetime.datetime(year, month, day, 12, 0, 0)
+        try:
+            return datetime.datetime(year, month, day, 12, 0, 0)
+        except ValueError:
+            print('warning: bad date %d: year %d, month %d, day %d' % (v, year, month, day))
+            return None
 
     @staticmethod
     def munge_filename(f):
@@ -218,17 +222,20 @@ class Apex:
             for b in range(entry.first_block, entry.first_block + entry.size_blocks):
                 data += self.blocks[b]
             if textFile:
-                cz = blocks[b].find(chr(0x1a))
+                cz = self.blocks[b].find(0x1a)
                 if (cz >= 0):
                     data = data[:cz]
             if destzip is not None:
-                info = ZipInfo(filename, date_time = (entry.date.year,
-                                                      entry.date.month,
-                                                      entry.date.day,
-                                                      entry.date.hour,
-                                                      entry.date.minute,
-                                                      entry.date.second))
-                destzip.writestr(info, data)
+                if entry.date is None:
+                    destzip.writestr(filename, data)
+                else:
+                    info = ZipInfo(filename, date_time = (entry.date.year,
+                                                          entry.date.month,
+                                                          entry.date.day,
+                                                          entry.date.hour,
+                                                          entry.date.minute,
+                                                          entry.date.second))
+                    destzip.writestr(info, data)
             else:
                 if args.destdir is not None:
                     path = os.path.join(destdir, filename)
@@ -236,8 +243,9 @@ class Apex:
                     path = filename
                 with open(path, 'wb') as f:
                     f.write(data)
-                timestamp = time.mktime(entry.date.timetuple())
-                os.utime(path, (timestamp, timestamp))
+                if entry.date is not None:
+                    timestamp = time.mktime(entry.date.timetuple())
+                    os.utime(path, (timestamp, timestamp))
         if destzip is not None:
             destzip.close()
 
