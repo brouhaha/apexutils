@@ -40,18 +40,20 @@ def hexdump(b):
 
 class Apex:
     
-    DirEntry = namedtuple('DirEntry', ['filename',
+    DirEntry = namedtuple('DirEntry', ['status',
+                                       'filename',
                                        'first_block',
                                        'size_blocks',
                                        'date'])
 
-    def __init__(self, image):
+    def __init__(self, image,
+                 backup_dir = False,
+                 include_tentative = False,
+                 include_replaced = False):
         if isinstance(image, str):
             image = open(image, 'rb')
         if isinstance(image, io.IOBase):
-            self.image = image.read()
-        else:
-            self.image = image
+            image = image.read()
 
         self.block_size = 256
 
@@ -60,7 +62,7 @@ class Apex:
         self.blocks_per_track = 16
         self.files_per_dir = 48
 
-        if len(self.image) != self.block_size * self.block_count:
+        if len(image) != self.block_size * self.block_count:
             raise Exception('wrong file size')
 
         # DOS 3.3 uses 2:1 interleave in descending order
@@ -87,9 +89,11 @@ class Apex:
         self.prodos_to_dos33 = self.compose_table(self.prodos_to_phys,
                                                   self.phys_to_dos33)
 
-        self.blocks = [self.image[self.block_to_offset(b):self.block_to_offset(b)+self.block_size] for b in range(self.block_count)]
+        self.blocks = [image[self.block_to_offset(b):self.block_to_offset(b)+self.block_size] for b in range(self.block_count)]
 
-        self.parse_directory()
+        self.parse_directory(backup_dir = backup_dir,
+                             include_tentative = include_tentative,
+                             include_replaced  = include_replaced)
 
 
     @staticmethod
@@ -140,7 +144,7 @@ class Apex:
     # max 48 files in directory
     # dir:
     #   $000-$20f     0- 527:  11-byte filename entries
-    #   $210-$23f   528- 575:  status - 0=null, <128 closed, >127 tentative
+    #   $210-$23f   528- 575:  status - 0=null, 1=valid, 254=replace, 255=tentative
     #   $240-$29f   576- 671:  first block #
     #   $2a0-$2ff   672- 767:  last block #
     #   $300-$349   768- 841:
@@ -152,8 +156,12 @@ class Apex:
     #   $396-$397   918- 919:  dirdat
     #   $398-$3f7   920-1015:  fdate
     #   $3f8-$3ff  1016-1023:  flags
-    def parse_directory(self, pattern = None, backup = False):
-        if backup:
+    def parse_directory(self,
+                        pattern = None,
+                        backup_dir = False,
+                        include_tentative = False,
+                        include_replaced = False):
+        if backup_dir:
             raw_dir = self.blocks[13] + self.blocks[14] + self.blocks[15] + self.blocks[16]
         else:
             raw_dir = self.blocks[9] + self.blocks[10] + self.blocks[11] + self.blocks[12]
@@ -161,13 +169,20 @@ class Apex:
         self.dir = []
         for i in range(self.files_per_dir):
             status = raw_dir[528+i]
-            if status == 0:
-               continue
             name = ''.join(chr(c) for c in raw_dir[i*11: i*11+8]) + '.' + ''.join(chr(c) for c in raw_dir[i*11+8: i*11+11])
+            if status == 0:
+                continue
+            if status not in [1, 254, 255]:
+                print('file %s has unexpected status %d', (name, status))
+                continue
+            if status == 254 and not include_replaced:
+                continue
+            if status == 255 and not include_tentative:
+                continue
             first_block = raw_dir[576+2*i] + 256 * raw_dir[576+2*i+1]
             last_block = raw_dir[672+2*i] + 256 * raw_dir[672+2*i+1]
             fdate = raw_dir[920+2*i] + 256 * raw_dir[920+2*i+1]
-            self.dir.append(self.DirEntry(name, first_block, last_block - first_block + 1, self.decode_date(fdate)))
+            self.dir.append(self.DirEntry(status, name, first_block, last_block - first_block + 1, self.decode_date(fdate)))
 
 
     @staticmethod
@@ -185,21 +200,22 @@ class Apex:
         else:
             dir = self.dir
 
-        print('filename     start  size  date     ', file = f)
-        print('------------ ----- ----- ----------', file = f)
+        print('filename     s start  size  date     ', file = f)
+        print('------------ - ----- ----- ----------', file = f)
         for entry in dir:
             filename = self.munge_filename(entry.filename)
             if not self.match_filename(filename, patterns):
                 continue
-            print('%11s %5d %5d %s' % (entry.filename,
-                                       entry.first_block,
-                                       entry.size_blocks,
-                                       entry.date), file = f)
+            print('%11s %c %5d %5d %s' % (entry.filename,
+                                          { 1: ' ', 254: 'r', 255: 't' }[entry.status],
+                                          entry.first_block,
+                                          entry.size_blocks,
+                                          entry.date), file = f)
 
     bin_extensions = ('.bin', '.i2l', '.obj', '.sav', '.sys')
     # .pdq .dat ?
 
-    def extract_files(self, patterns = None, destdir = None, destzip = None, verbose = False, text_only = False):
+    def extract_files(self, patterns = None, destdir = None, destzip = None, verbose = False, text_only = False, text_conv = False):
         if destzip is not None:
             destzip = ZipFile(destzip, mode='w')
         if destdir is not None:
@@ -215,14 +231,19 @@ class Apex:
             if text_only and not textFile:
                 continue
 
+            if entry.status == 254:
+                filename += '.replaced'
+            elif entry.status == 255:
+                filename += '.tentative'
+
             if verbose:
                 print('extracting %s' % filename)
 
             data = bytearray()
             for b in range(entry.first_block, entry.first_block + entry.size_blocks):
                 data += self.blocks[b]
-            if textFile:
-                cz = self.blocks[b].find(0x1a)
+            if textFile and text_conv:
+                cz = data.find(0x1a)
                 if (cz >= 0):
                     data = data[:cz]
             if destzip is not None:
@@ -257,20 +278,38 @@ if __name__ == '__main__':
                         action = 'store_true',
                         help = 'increased verbosity')
 
+    parser.add_argument('--tentative',
+                        action = 'store_true',
+                        help = 'include tentative files')
+
+    parser.add_argument('--replaced',
+                        action = 'store_true',
+                        help = 'include replaced files')
+
     subparsers = parser.add_subparsers(dest = 'command',
                                        help = 'sub-command help')
 
-    parser_ls = subparsers.add_parser('ls', aliases = ['dir', 'v', 'l'],
+    ls_commands = ['ls', 'dir', 'v', 'l']
+
+    parser_ls = subparsers.add_parser(ls_commands[0],
+                                      aliases = ls_commands[1:],
                                       help = 'list directory')
 
-    parser_extract = subparsers.add_parser('extract', aliases = ['e', 'x'],
+    extract_commands = ['extract', 'e', 'x']
+
+    parser_extract = subparsers.add_parser(extract_commands[0],
+                                           aliases = extract_commands[1:],
                                            help = 'extract files')
-    parser_extract.add_argument('-d', '--destdir',
-                                type = str,
-                                help = 'destination directory')
-    parser_extract.add_argument('-z', '--destzip',
-                                type = argparse.FileType('wb'),
-                                help = 'destination ZIP file')
+    parser_extract.add_argument('-t', '--textconv',
+                                action = 'store_true',
+                                help = 'truncate text files to EOF char')
+    dest_group = parser_extract.add_mutually_exclusive_group(required = True)
+    dest_group.add_argument('-d', '--destdir',
+                            type = str,
+                            help = 'destination directory')
+    dest_group.add_argument('-z', '--destzip',
+                            type = argparse.FileType('wb'),
+                            help = 'destination ZIP file')
 
     '''
     image_type_group = parser.add_mutually_exclusive_group()
@@ -309,17 +348,21 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    apex = Apex(args.image)
+    apex = Apex(args.image,
+                include_tentative = args.tentative,
+                include_replaced  = args.replaced)
     
     if args.pattern is None:
         patterns = []
     else:
         patterns = [args.pattern]
 
-    if args.command == 'ls':
-        apex.list_directory(f = sys.stdout, patterns = patterns)
-    elif args.command == 'extract':
+    if args.command in ls_commands:
+        apex.list_directory(f = sys.stdout,
+                            patterns = patterns)
+    elif args.command in extract_commands:
         apex.extract_files(patterns = patterns,
                            destdir = args.destdir,
                            destzip = args.destzip,
-                           verbose = args.verbose)
+                           verbose = args.verbose,
+                           text_conv = args.textconv)
