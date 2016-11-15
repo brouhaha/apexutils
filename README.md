@@ -14,8 +14,9 @@ originally for use on the 6502. Apex was written in
 a portable block structured language, and was later ported to 68000 systems.
 
 This package currently provides a single utility, 'apex', which
-can list the directory of an Apple II Apex disk image file, or
-extract files from such an image.
+can list the directory of an Apple II Apex disk image file, extract files
+from a disk image, or copy the contents of a host file into an existing
+Apex file in a disk image.
 
 The image should be a "DOS order" image.
 
@@ -26,26 +27,31 @@ and Python 3.4 or newer is required.
 
 ## Usage:
 
-* To list the directory of the image xpl0.dsk:
+* To list the directory of the image `xpl0.dsk`:
 
   `apex ls xpl0.dsk`
 
-* To list only the '.sav' files:
+* To list only the `.sav` files:
 
   `apex ls --pattern '*.sav' xpl0.dsk`
 
 * To extract all of the files from the image xpl0.dsk to the current
-directory:
+  directory:
 
   `apex extract xpl0.dsk`
 
-* To extract all of the '.sav' files into the directory 'save_files':
+* To extract all of the `.sav` files into the directory `save_files`:
 
   `apex extract --pattern '*.sav' --destdir save_files xpl0.dsk`
 
-* To extract all of the '.sys' files into a new ZIP file 'sys_files.zip':
+* To extract all of the `.sys` files into a new ZIP file `sys_files.zip`:
 
   `apex extract --pattern '*.sys' --destzip sys_files.zip xpl0.dsk`
+
+* To insert the contents of the host file `foo.txt` into the existing Apex
+  file `bar.txt` of the image `xpl0.dsk`:
+
+  `apex insert foo.txt bar.txt xpl0.dsk`
 
 
 ## License information:

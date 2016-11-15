@@ -47,13 +47,17 @@ class Apex:
                                        'date'])
 
     def __init__(self, image,
+                 update = False,
                  backup_dir = False,
                  include_tentative = False,
                  include_replaced = False):
         if isinstance(image, str):
-            image = open(image, 'rb')
-        if isinstance(image, io.IOBase):
-            image = image.read()
+            if update:
+                self.imagef = open(image, 'r+b')
+            else:
+                self.imagef = open(image, 'rb')
+        image = self.imagef.read()
+        self.dirty = False
 
         self.block_size = 256
 
@@ -94,6 +98,26 @@ class Apex:
         self.parse_directory(backup_dir = backup_dir,
                              include_tentative = include_tentative,
                              include_replaced  = include_replaced)
+
+
+    def flush(self):
+        if not self.dirty:
+            return
+
+        image = bytearray(self.block_size * self.block_count)
+        for block_num in range(self.block_count):
+            offset = self.block_to_offset(block_num)
+            image[offset:offset+self.block_size] = self.blocks[block_num]
+
+        self.imagef.seek(0)
+        self.imagef.write(image)
+
+        self.dirty = False
+
+
+    def close(self):
+        self.flush()
+        self.imagef.close()
 
 
     @staticmethod
@@ -211,6 +235,7 @@ class Apex:
                                           entry.first_block,
                                           entry.size_blocks,
                                           entry.date), file = f)
+        return True
 
     bin_extensions = ('.bin', '.i2l', '.obj', '.sav', '.sys')
     # .pdq .dat ?
@@ -269,6 +294,27 @@ class Apex:
                     os.utime(path, (timestamp, timestamp))
         if destzip is not None:
             destzip.close()
+        return True
+
+    def insert_file(self, hostf, fn):
+        for entry in self.dir:
+            filename = self.munge_filename(entry.filename)
+            if self.match_filename(filename, [fn]):
+                break
+        else:
+            print('Apex file not found', file = sys.stderr)
+            return False
+        data = hostf.read()
+        # pad to block boundary
+        if len(data) % self.block_size != 0:
+            data += bytearray(self.block_size - (len(data) % self.block_size))
+        if len(data) > (entry.size_blocks * self.block_size):
+            print('host file longer than Apex file', file = sys.stderr)
+            return False
+        for rel_block_num in range(0, len(data) // self.block_size):
+            offset = rel_block_num * self.block_size
+            self.blocks[entry.first_block + rel_block_num] = data[offset:offset + self.block_size]
+        self.dirty = True
 
 
 if __name__ == '__main__':
@@ -311,6 +357,18 @@ if __name__ == '__main__':
                             type = argparse.FileType('wb'),
                             help = 'destination ZIP file')
 
+    insert_commands = ['insert']
+
+    parser_insert = subparsers.add_parser(insert_commands[0],
+                                          aliases = insert_commands[1:],
+                                          help = 'insert file')
+    parser_insert.add_argument('hostf',
+                               type = argparse.FileType('rb'),
+                               help = 'host file to insert')
+    parser_insert.add_argument('apexfn',
+                               type = str,
+                               help = 'destination Apex filename')
+
     '''
     image_type_group = parser.add_mutually_exclusive_group()
     image_type_group.add_argument('--logical',
@@ -335,8 +393,8 @@ if __name__ == '__main__':
                         help = 'filename pattern to match')
 
     parser.add_argument('image',
-                        type = argparse.FileType('rb'),
-                        help = 'Apex image file')
+                        type = str,
+                        help = 'Apex image filename')
     
     # Unfortunately, putting the 'patterns' arg after the 'image' arg
     # makes parsing fail.
@@ -350,7 +408,8 @@ if __name__ == '__main__':
 
     apex = Apex(args.image,
                 include_tentative = args.tentative,
-                include_replaced  = args.replaced)
+                include_replaced  = args.replaced,
+                update = args.command in insert_commands)
     
     if args.pattern is None:
         patterns = []
@@ -358,11 +417,23 @@ if __name__ == '__main__':
         patterns = [args.pattern]
 
     if args.command in ls_commands:
-        apex.list_directory(f = sys.stdout,
-                            patterns = patterns)
+        result = apex.list_directory(f = sys.stdout,
+                                     patterns = patterns)
     elif args.command in extract_commands:
-        apex.extract_files(patterns = patterns,
-                           destdir = args.destdir,
-                           destzip = args.destzip,
-                           verbose = args.verbose,
-                           text_conv = args.textconv)
+        result = apex.extract_files(patterns = patterns,
+                                    destdir = args.destdir,
+                                    destzip = args.destzip,
+                                    verbose = args.verbose,
+                                    text_conv = args.textconv)
+    elif args.command in insert_commands:
+        result = apex.insert_file(hostf = args.hostf,
+                                  fn = args.apexfn)
+    else:
+        print('Internal error', file = sys.stderr)
+        result = False
+
+    apex.close()
+    if result:
+        sys.exit(0)
+    else:
+        sys.exit(1)
